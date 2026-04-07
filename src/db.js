@@ -3,7 +3,45 @@ const path = require("path");
 const sqlite3 = require("sqlite3");
 const { open } = require("sqlite");
 const { Pool } = require("pg");
-const { getWeekStartKey } = require("./week");
+const { getDateKey, getLastDateKeys, getWeekStartKey } = require("./week");
+
+function parseStoredTimestamp(value) {
+  if (value instanceof Date) {
+    return value;
+  }
+
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) {
+    return new Date(value.replace(" ", "T") + "Z");
+  }
+
+  return new Date(value);
+}
+
+function buildDailyTotals(rows, timezone, days = 7, date = new Date()) {
+  const dateKeys = getLastDateKeys(days, date, timezone);
+  const totals = new Map(dateKeys.map((dateKey) => [dateKey, 0]));
+
+  for (const row of rows) {
+    const timestamp = parseStoredTimestamp(row.created_at);
+
+    if (Number.isNaN(timestamp.getTime())) {
+      continue;
+    }
+
+    const dateKey = getDateKey(timestamp, timezone);
+
+    if (!totals.has(dateKey)) {
+      continue;
+    }
+
+    totals.set(dateKey, totals.get(dateKey) + Number(row.estimated_calories || 0));
+  }
+
+  return dateKeys.map((dateKey) => ({
+    dateKey,
+    totalCalories: totals.get(dateKey) || 0
+  }));
+}
 
 async function initDb(options) {
   const { databaseUrl, databasePath, timezone } = options;
@@ -31,6 +69,12 @@ async function initSqliteDb(databasePath, timezone) {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS chat_targets (
+      source_id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS meal_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
@@ -41,6 +85,13 @@ async function initSqliteDb(databasePath, timezone) {
       walking_minutes INTEGER NOT NULL,
       jogging_minutes INTEGER NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_reports (
+      source_id TEXT NOT NULL,
+      report_date TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (source_id, report_date)
     );
 
     CREATE INDEX IF NOT EXISTS idx_meal_logs_user_week
@@ -75,6 +126,19 @@ async function initSqliteDb(databasePath, timezone) {
     kind: "sqlite",
     db,
     ensureCurrentWeek,
+    async registerChatTarget(target) {
+      await db.run(
+        `
+          INSERT INTO chat_targets (source_id, source_type, last_seen_at)
+          VALUES (?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(source_id) DO UPDATE SET
+            source_type = excluded.source_type,
+            last_seen_at = CURRENT_TIMESTAMP
+        `,
+        target.sourceId,
+        target.sourceType
+      );
+    },
     async logMeal(entry) {
       const activeWeekStart = await ensureCurrentWeek();
 
@@ -117,6 +181,42 @@ async function initSqliteDb(databasePath, timezone) {
         totalCalories: row?.total_calories || row?.totalCalories || 0
       };
     },
+    async getDailyTotals(userId, days = 7, date = new Date()) {
+      const rows = await db.all(
+        `
+          SELECT estimated_calories, created_at
+          FROM meal_logs
+          WHERE user_id = ?
+            AND created_at >= DATETIME('now', ?)
+          ORDER BY created_at ASC
+        `,
+        userId,
+        `-${Math.max(days + 1, 8)} days`
+      );
+
+      return buildDailyTotals(rows, timezone, days, date);
+    },
+    async getNotificationTargets() {
+      return db.all(
+        `
+          SELECT source_id AS sourceId, source_type AS sourceType
+          FROM chat_targets
+          ORDER BY last_seen_at ASC
+        `
+      );
+    },
+    async markDailyReportSent(sourceId, reportDate) {
+      const result = await db.run(
+        `
+          INSERT OR IGNORE INTO daily_reports (source_id, report_date)
+          VALUES (?, ?)
+        `,
+        sourceId,
+        reportDate
+      );
+
+      return result.changes > 0;
+    },
     async resetWeek(date = new Date()) {
       const newWeekStart = getWeekStartKey(date, timezone);
       await setActiveWeek(newWeekStart);
@@ -141,6 +241,12 @@ async function initPostgresDb(databaseUrl, timezone) {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS chat_targets (
+      source_id TEXT PRIMARY KEY,
+      source_type TEXT NOT NULL,
+      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS meal_logs (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -151,6 +257,13 @@ async function initPostgresDb(databaseUrl, timezone) {
       walking_minutes INTEGER NOT NULL,
       jogging_minutes INTEGER NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS daily_reports (
+      source_id TEXT NOT NULL,
+      report_date TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (source_id, report_date)
     );
 
     CREATE INDEX IF NOT EXISTS idx_meal_logs_user_week
@@ -188,6 +301,18 @@ async function initPostgresDb(databaseUrl, timezone) {
       close: () => pool.end()
     },
     ensureCurrentWeek,
+    async registerChatTarget(target) {
+      await pool.query(
+        `
+          INSERT INTO chat_targets (source_id, source_type, last_seen_at)
+          VALUES ($1, $2, NOW())
+          ON CONFLICT(source_id) DO UPDATE SET
+            source_type = EXCLUDED.source_type,
+            last_seen_at = NOW()
+        `,
+        [target.sourceId, target.sourceType]
+      );
+    },
     async logMeal(entry) {
       const activeWeekStart = await ensureCurrentWeek();
 
@@ -230,6 +355,44 @@ async function initPostgresDb(databaseUrl, timezone) {
         weekStart: activeWeekStart,
         totalCalories: Number(result.rows[0]?.total_calories || 0)
       };
+    },
+    async getDailyTotals(userId, days = 7, date = new Date()) {
+      const result = await pool.query(
+        `
+          SELECT estimated_calories, created_at
+          FROM meal_logs
+          WHERE user_id = $1
+            AND created_at >= NOW() - ($2 || ' days')::INTERVAL
+          ORDER BY created_at ASC
+        `,
+        [userId, String(Math.max(days + 1, 8))]
+      );
+
+      return buildDailyTotals(result.rows, timezone, days, date);
+    },
+    async getNotificationTargets() {
+      const result = await pool.query(
+        `
+          SELECT source_id AS "sourceId", source_type AS "sourceType"
+          FROM chat_targets
+          ORDER BY last_seen_at ASC
+        `
+      );
+
+      return result.rows;
+    },
+    async markDailyReportSent(sourceId, reportDate) {
+      const result = await pool.query(
+        `
+          INSERT INTO daily_reports (source_id, report_date)
+          VALUES ($1, $2)
+          ON CONFLICT (source_id, report_date) DO NOTHING
+          RETURNING source_id
+        `,
+        [sourceId, reportDate]
+      );
+
+      return result.rowCount > 0;
     },
     async resetWeek(date = new Date()) {
       const newWeekStart = getWeekStartKey(date, timezone);

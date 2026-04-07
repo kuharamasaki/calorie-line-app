@@ -32,7 +32,28 @@ function getWeekStartKey(date = new Date(), timeZone = "Asia/Tokyo") {
   return utcDate.toISOString().slice(0, 10);
 }
 
+function getDateKey(date = new Date(), timeZone = "Asia/Tokyo") {
+  const { year, month, day } = getTokyoDateParts(date, timeZone);
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function getLastDateKeys(days, date = new Date(), timeZone = "Asia/Tokyo") {
+  const { year, month, day } = getTokyoDateParts(date, timeZone);
+  const baseDate = new Date(Date.UTC(year, month - 1, day));
+  const result = [];
+
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const current = new Date(baseDate);
+    current.setUTCDate(current.getUTCDate() - offset);
+    result.push(current.toISOString().slice(0, 10));
+  }
+
+  return result;
+}
+
 module.exports = {
+  getDateKey,
+  getLastDateKeys,
   getTokyoDateParts,
   getWeekStartKey
 };

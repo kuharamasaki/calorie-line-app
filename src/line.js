@@ -49,8 +49,28 @@ async function replyMessage(replyToken, messages, accessToken) {
   }
 }
 
+async function pushMessage(to, messages, accessToken) {
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      to,
+      messages
+    })
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to push LINE message: ${response.status} ${text}`);
+  }
+}
+
 module.exports = {
   verifyLineSignature,
   getMessageContent,
-  replyMessage
+  replyMessage,
+  pushMessage
 };
