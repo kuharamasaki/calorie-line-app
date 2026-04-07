@@ -68,9 +68,25 @@ async function pushMessage(to, messages, accessToken) {
   }
 }
 
+async function getGroupMemberProfile(groupId, userId, accessToken) {
+  const response = await fetch(`https://api.line.me/v2/bot/group/${groupId}/member/${userId}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to fetch LINE group member profile: ${response.status} ${text}`);
+  }
+
+  return response.json();
+}
+
 module.exports = {
   verifyLineSignature,
   getMessageContent,
   replyMessage,
-  pushMessage
+  pushMessage,
+  getGroupMemberProfile
 };

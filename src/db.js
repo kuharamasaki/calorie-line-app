@@ -3,57 +3,18 @@ const path = require("path");
 const sqlite3 = require("sqlite3");
 const { open } = require("sqlite");
 const { Pool } = require("pg");
-const { getDateKey, getLastDateKeys, getWeekStartKey } = require("./week");
-
-function parseStoredTimestamp(value) {
-  if (value instanceof Date) {
-    return value;
-  }
-
-  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) {
-    return new Date(value.replace(" ", "T") + "Z");
-  }
-
-  return new Date(value);
-}
-
-function buildDailyTotals(rows, timezone, days = 7, date = new Date()) {
-  const dateKeys = getLastDateKeys(days, date, timezone);
-  const totals = new Map(dateKeys.map((dateKey) => [dateKey, 0]));
-
-  for (const row of rows) {
-    const timestamp = parseStoredTimestamp(row.created_at);
-
-    if (Number.isNaN(timestamp.getTime())) {
-      continue;
-    }
-
-    const dateKey = getDateKey(timestamp, timezone);
-
-    if (!totals.has(dateKey)) {
-      continue;
-    }
-
-    totals.set(dateKey, totals.get(dateKey) + Number(row.estimated_calories || 0));
-  }
-
-  return dateKeys.map((dateKey) => ({
-    dateKey,
-    totalCalories: totals.get(dateKey) || 0
-  }));
-}
 
 async function initDb(options) {
-  const { databaseUrl, databasePath, timezone } = options;
+  const { databaseUrl, databasePath } = options;
 
   if (databaseUrl) {
-    return initPostgresDb(databaseUrl, timezone);
+    return initPostgresDb(databaseUrl);
   }
 
-  return initSqliteDb(databasePath, timezone);
+  return initSqliteDb(databasePath);
 }
 
-async function initSqliteDb(databasePath, timezone) {
+async function initSqliteDb(databasePath) {
   if (databasePath !== ":memory:") {
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   }
@@ -64,168 +25,57 @@ async function initSqliteDb(databasePath, timezone) {
   });
 
   await db.exec(`
-    CREATE TABLE IF NOT EXISTS app_state (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS chat_targets (
-      source_id TEXT PRIMARY KEY,
-      source_type TEXT NOT NULL,
-      last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-
-    CREATE TABLE IF NOT EXISTS meal_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
-      week_start TEXT NOT NULL,
-      estimated_calories INTEGER NOT NULL,
-      meal_name TEXT NOT NULL,
-      description TEXT NOT NULL,
-      walking_minutes INTEGER NOT NULL,
-      jogging_minutes INTEGER NOT NULL,
+      display_name TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (group_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS photo_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      message_id TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      shot_at_text TEXT NOT NULL,
+      location_text TEXT NOT NULL,
+      summary TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE TABLE IF NOT EXISTS daily_reports (
-      source_id TEXT NOT NULL,
-      report_date TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      PRIMARY KEY (source_id, report_date)
+    CREATE TABLE IF NOT EXISTS reset_requests (
+      group_id TEXT PRIMARY KEY,
+      requested_by_user_id TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL,
+      requested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE INDEX IF NOT EXISTS idx_meal_logs_user_week
-      ON meal_logs (user_id, week_start);
+    CREATE TABLE IF NOT EXISTS reset_approvals (
+      group_id TEXT NOT NULL,
+      approved_by_user_id TEXT NOT NULL,
+      approved_by_name TEXT NOT NULL,
+      approved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (group_id, approved_by_user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_photo_entries_group_score
+      ON photo_entries (group_id, score DESC, created_at ASC);
   `);
 
-  async function setActiveWeek(weekStart) {
-    await db.run(
-      `
-        INSERT INTO app_state (key, value)
-        VALUES ('active_week_start', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `,
-      weekStart
-    );
-  }
-
-  async function ensureCurrentWeek(date = new Date()) {
-    const currentWeekStart = getWeekStartKey(date, timezone);
-    const row = await db.get(`SELECT value FROM app_state WHERE key = 'active_week_start'`);
-
-    if (!row || row.value !== currentWeekStart) {
-      await setActiveWeek(currentWeekStart);
-    }
-
-    return currentWeekStart;
-  }
-
-  await ensureCurrentWeek();
-
-  return {
+  return createStore({
     kind: "sqlite",
-    db,
-    ensureCurrentWeek,
-    async registerChatTarget(target) {
-      await db.run(
-        `
-          INSERT INTO chat_targets (source_id, source_type, last_seen_at)
-          VALUES (?, ?, CURRENT_TIMESTAMP)
-          ON CONFLICT(source_id) DO UPDATE SET
-            source_type = excluded.source_type,
-            last_seen_at = CURRENT_TIMESTAMP
-        `,
-        target.sourceId,
-        target.sourceType
-      );
-    },
-    async logMeal(entry) {
-      const activeWeekStart = await ensureCurrentWeek();
-
-      await db.run(
-        `
-          INSERT INTO meal_logs (
-            user_id,
-            week_start,
-            estimated_calories,
-            meal_name,
-            description,
-            walking_minutes,
-            jogging_minutes
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `,
-        entry.userId,
-        activeWeekStart,
-        entry.estimatedCalories,
-        entry.mealName,
-        entry.description,
-        entry.walkingMinutes,
-        entry.joggingMinutes
-      );
-    },
-    async getWeeklyTotal(userId) {
-      const activeWeekStart = await ensureCurrentWeek();
-      const row = await db.get(
-        `
-          SELECT COALESCE(SUM(estimated_calories), 0) AS total_calories
-          FROM meal_logs
-          WHERE user_id = ? AND week_start = ?
-        `,
-        userId,
-        activeWeekStart
-      );
-
-      return {
-        weekStart: activeWeekStart,
-        totalCalories: row?.total_calories || row?.totalCalories || 0
-      };
-    },
-    async getDailyTotals(userId, days = 7, date = new Date()) {
-      const rows = await db.all(
-        `
-          SELECT estimated_calories, created_at
-          FROM meal_logs
-          WHERE user_id = ?
-            AND created_at >= DATETIME('now', ?)
-          ORDER BY created_at ASC
-        `,
-        userId,
-        `-${Math.max(days + 1, 8)} days`
-      );
-
-      return buildDailyTotals(rows, timezone, days, date);
-    },
-    async getNotificationTargets() {
-      return db.all(
-        `
-          SELECT source_id AS sourceId, source_type AS sourceType
-          FROM chat_targets
-          ORDER BY last_seen_at ASC
-        `
-      );
-    },
-    async markDailyReportSent(sourceId, reportDate) {
-      const result = await db.run(
-        `
-          INSERT OR IGNORE INTO daily_reports (source_id, report_date)
-          VALUES (?, ?)
-        `,
-        sourceId,
-        reportDate
-      );
-
-      return result.changes > 0;
-    },
-    async resetWeek(date = new Date()) {
-      const newWeekStart = getWeekStartKey(date, timezone);
-      await setActiveWeek(newWeekStart);
-      return newWeekStart;
-    }
-  };
+    queryOne: (sql, params = []) => db.get(sql, params),
+    queryAll: (sql, params = []) => db.all(sql, params),
+    run: (sql, params = []) => db.run(sql, params),
+    close: () => db.close()
+  });
 }
 
-async function initPostgresDb(databaseUrl, timezone) {
+async function initPostgresDb(databaseUrl) {
   const pool = new Pool({
     connectionString: databaseUrl,
     ssl: databaseUrl.includes("localhost")
@@ -236,170 +86,213 @@ async function initPostgresDb(databaseUrl, timezone) {
   });
 
   await pool.query(`
-    CREATE TABLE IF NOT EXISTS app_state (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS chat_targets (
-      source_id TEXT PRIMARY KEY,
-      source_type TEXT NOT NULL,
-      last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS meal_logs (
-      id BIGSERIAL PRIMARY KEY,
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
-      week_start TEXT NOT NULL,
-      estimated_calories INTEGER NOT NULL,
-      meal_name TEXT NOT NULL,
-      description TEXT NOT NULL,
-      walking_minutes INTEGER NOT NULL,
-      jogging_minutes INTEGER NOT NULL,
+      display_name TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (group_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS photo_entries (
+      id BIGSERIAL PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      message_id TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      score INTEGER NOT NULL,
+      shot_at_text TEXT NOT NULL,
+      location_text TEXT NOT NULL,
+      summary TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE TABLE IF NOT EXISTS daily_reports (
-      source_id TEXT NOT NULL,
-      report_date TEXT NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (source_id, report_date)
+    CREATE TABLE IF NOT EXISTS reset_requests (
+      group_id TEXT PRIMARY KEY,
+      requested_by_user_id TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX IF NOT EXISTS idx_meal_logs_user_week
-      ON meal_logs (user_id, week_start);
+    CREATE TABLE IF NOT EXISTS reset_approvals (
+      group_id TEXT NOT NULL,
+      approved_by_user_id TEXT NOT NULL,
+      approved_by_name TEXT NOT NULL,
+      approved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (group_id, approved_by_user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_photo_entries_group_score
+      ON photo_entries (group_id, score DESC, created_at ASC);
   `);
 
-  async function setActiveWeek(weekStart) {
-    await pool.query(
-      `
-        INSERT INTO app_state (key, value)
-        VALUES ('active_week_start', $1)
-        ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value
-      `,
-      [weekStart]
-    );
-  }
-
-  async function ensureCurrentWeek(date = new Date()) {
-    const currentWeekStart = getWeekStartKey(date, timezone);
-    const result = await pool.query(`SELECT value FROM app_state WHERE key = 'active_week_start'`);
-    const row = result.rows[0];
-
-    if (!row || row.value !== currentWeekStart) {
-      await setActiveWeek(currentWeekStart);
-    }
-
-    return currentWeekStart;
-  }
-
-  await ensureCurrentWeek();
-
-  return {
+  return createStore({
     kind: "postgres",
-    db: {
-      close: () => pool.end()
+    queryOne: async (sql, params = []) => {
+      const result = await pool.query(sql, params);
+      return result.rows[0];
     },
-    ensureCurrentWeek,
-    async registerChatTarget(target) {
-      await pool.query(
-        `
-          INSERT INTO chat_targets (source_id, source_type, last_seen_at)
-          VALUES ($1, $2, NOW())
-          ON CONFLICT(source_id) DO UPDATE SET
-            source_type = EXCLUDED.source_type,
-            last_seen_at = NOW()
-        `,
-        [target.sourceId, target.sourceType]
-      );
-    },
-    async logMeal(entry) {
-      const activeWeekStart = await ensureCurrentWeek();
-
-      await pool.query(
-        `
-          INSERT INTO meal_logs (
-            user_id,
-            week_start,
-            estimated_calories,
-            meal_name,
-            description,
-            walking_minutes,
-            jogging_minutes
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7)
-        `,
-        [
-          entry.userId,
-          activeWeekStart,
-          entry.estimatedCalories,
-          entry.mealName,
-          entry.description,
-          entry.walkingMinutes,
-          entry.joggingMinutes
-        ]
-      );
-    },
-    async getWeeklyTotal(userId) {
-      const activeWeekStart = await ensureCurrentWeek();
-      const result = await pool.query(
-        `
-          SELECT COALESCE(SUM(estimated_calories), 0) AS total_calories
-          FROM meal_logs
-          WHERE user_id = $1 AND week_start = $2
-        `,
-        [userId, activeWeekStart]
-      );
-
-      return {
-        weekStart: activeWeekStart,
-        totalCalories: Number(result.rows[0]?.total_calories || 0)
-      };
-    },
-    async getDailyTotals(userId, days = 7, date = new Date()) {
-      const result = await pool.query(
-        `
-          SELECT estimated_calories, created_at
-          FROM meal_logs
-          WHERE user_id = $1
-            AND created_at >= NOW() - ($2 || ' days')::INTERVAL
-          ORDER BY created_at ASC
-        `,
-        [userId, String(Math.max(days + 1, 8))]
-      );
-
-      return buildDailyTotals(result.rows, timezone, days, date);
-    },
-    async getNotificationTargets() {
-      const result = await pool.query(
-        `
-          SELECT source_id AS "sourceId", source_type AS "sourceType"
-          FROM chat_targets
-          ORDER BY last_seen_at ASC
-        `
-      );
-
+    queryAll: async (sql, params = []) => {
+      const result = await pool.query(sql, params);
       return result.rows;
     },
-    async markDailyReportSent(sourceId, reportDate) {
-      const result = await pool.query(
-        `
-          INSERT INTO daily_reports (source_id, report_date)
-          VALUES ($1, $2)
-          ON CONFLICT (source_id, report_date) DO NOTHING
-          RETURNING source_id
-        `,
-        [sourceId, reportDate]
-      );
-
-      return result.rowCount > 0;
+    run: async (sql, params = []) => {
+      const result = await pool.query(sql, params);
+      return { changes: result.rowCount || 0 };
     },
-    async resetWeek(date = new Date()) {
-      const newWeekStart = getWeekStartKey(date, timezone);
-      await setActiveWeek(newWeekStart);
-      return newWeekStart;
+    close: () => pool.end()
+  });
+}
+
+function createStore(driver) {
+  const sql = buildSql(driver.kind);
+
+  return {
+    kind: driver.kind,
+    close: driver.close,
+    async upsertGroupMember({ groupId, userId, displayName }) {
+      await driver.run(sql.upsertGroupMember, [groupId, userId, displayName]);
+    },
+    async savePhotoEntry(entry) {
+      await driver.run(sql.insertPhotoEntry, [
+        entry.groupId,
+        entry.userId,
+        entry.displayName,
+        entry.messageId,
+        entry.title,
+        entry.score,
+        entry.shotAtText,
+        entry.locationText,
+        entry.summary
+      ]);
+    },
+    async getTopRankings(groupId, limit = 5) {
+      return driver.queryAll(sql.getTopRankings(limit), [groupId]);
+    },
+    async getRankingPosition(groupId, messageId) {
+      const rows = await driver.queryAll(sql.getTopRankings(100), [groupId]);
+      return rows.findIndex((row) => row.messageId === messageId) + 1;
+    },
+    async createResetRequest({ groupId, requestedByUserId, requestedByName }) {
+      await driver.run(sql.deleteResetApprovalsByGroup, [groupId]);
+      await driver.run(sql.upsertResetRequest, [groupId, requestedByUserId, requestedByName]);
+      return driver.queryOne(sql.getResetRequest, [groupId]);
+    },
+    async getResetRequest(groupId) {
+      return driver.queryOne(sql.getResetRequest, [groupId]);
+    },
+    async approveReset({ groupId, approvedByUserId, approvedByName }) {
+      const request = await driver.queryOne(sql.getResetRequest, [groupId]);
+
+      if (!request) {
+        return { status: "missing" };
+      }
+
+      if (request.requestedByUserId === approvedByUserId) {
+        return { status: "self_approval_blocked", request };
+      }
+
+      await driver.run(sql.insertResetApproval, [groupId, approvedByUserId, approvedByName]);
+      const approvalCountRow = await driver.queryOne(sql.getResetApprovalCount, [groupId]);
+      const approvalCount = Number(approvalCountRow?.approvalCount || approvalCountRow?.approval_count || 0);
+
+      if (approvalCount < 1) {
+        return { status: "pending", request, approvalCount };
+      }
+
+      await driver.run(sql.deletePhotoEntriesByGroup, [groupId]);
+      await driver.run(sql.deleteResetApprovalsByGroup, [groupId]);
+      await driver.run(sql.deleteResetRequestByGroup, [groupId]);
+
+      return { status: "completed", request, approvalCount };
     }
   };
+}
+
+function buildSql(kind) {
+  const useDollar = kind === "postgres";
+  const p = (index) => (useDollar ? `$${index}` : "?");
+
+  return {
+    upsertGroupMember: `
+      INSERT INTO group_members (group_id, user_id, display_name, updated_at)
+      VALUES (${p(1)}, ${p(2)}, ${p(3)}, ${currentTimestamp(kind)})
+      ${useDollar ? "ON CONFLICT (group_id, user_id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = NOW()" : "ON CONFLICT(group_id, user_id) DO UPDATE SET display_name = excluded.display_name, updated_at = CURRENT_TIMESTAMP"}
+    `,
+    insertPhotoEntry: `
+      INSERT INTO photo_entries (
+        group_id,
+        user_id,
+        display_name,
+        message_id,
+        title,
+        score,
+        shot_at_text,
+        location_text,
+        summary
+      )
+      VALUES (${p(1)}, ${p(2)}, ${p(3)}, ${p(4)}, ${p(5)}, ${p(6)}, ${p(7)}, ${p(8)}, ${p(9)})
+    `,
+    getTopRankings: (limit) => `
+      SELECT
+        id,
+        group_id AS "groupId",
+        user_id AS "userId",
+        display_name AS "displayName",
+        message_id AS "messageId",
+        title,
+        score,
+        shot_at_text AS "shotAtText",
+        location_text AS "locationText",
+        summary,
+        created_at AS "createdAt"
+      FROM photo_entries
+      WHERE group_id = ${p(1)}
+      ORDER BY score DESC, created_at ASC
+      LIMIT ${limit}
+    `,
+    upsertResetRequest: `
+      INSERT INTO reset_requests (group_id, requested_by_user_id, requested_by_name, requested_at)
+      VALUES (${p(1)}, ${p(2)}, ${p(3)}, ${currentTimestamp(kind)})
+      ${useDollar ? "ON CONFLICT (group_id) DO UPDATE SET requested_by_user_id = EXCLUDED.requested_by_user_id, requested_by_name = EXCLUDED.requested_by_name, requested_at = NOW()" : "ON CONFLICT(group_id) DO UPDATE SET requested_by_user_id = excluded.requested_by_user_id, requested_by_name = excluded.requested_by_name, requested_at = CURRENT_TIMESTAMP"}
+    `,
+    getResetRequest: `
+      SELECT
+        group_id AS "groupId",
+        requested_by_user_id AS "requestedByUserId",
+        requested_by_name AS "requestedByName",
+        requested_at AS "requestedAt"
+      FROM reset_requests
+      WHERE group_id = ${p(1)}
+    `,
+    insertResetApproval: `
+      INSERT INTO reset_approvals (group_id, approved_by_user_id, approved_by_name, approved_at)
+      VALUES (${p(1)}, ${p(2)}, ${p(3)}, ${currentTimestamp(kind)})
+      ${useDollar ? "ON CONFLICT (group_id, approved_by_user_id) DO UPDATE SET approved_by_name = EXCLUDED.approved_by_name, approved_at = NOW()" : "ON CONFLICT(group_id, approved_by_user_id) DO UPDATE SET approved_by_name = excluded.approved_by_name, approved_at = CURRENT_TIMESTAMP"}
+    `,
+    getResetApprovalCount: `
+      SELECT COUNT(*) AS "approvalCount"
+      FROM reset_approvals
+      WHERE group_id = ${p(1)}
+    `,
+    deleteResetApprovalsByGroup: `
+      DELETE FROM reset_approvals
+      WHERE group_id = ${p(1)}
+    `,
+    deleteResetRequestByGroup: `
+      DELETE FROM reset_requests
+      WHERE group_id = ${p(1)}
+    `,
+    deletePhotoEntriesByGroup: `
+      DELETE FROM photo_entries
+      WHERE group_id = ${p(1)}
+    `
+  };
+}
+
+function currentTimestamp(kind) {
+  return kind === "postgres" ? "NOW()" : "CURRENT_TIMESTAMP";
 }
 
 module.exports = {

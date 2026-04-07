@@ -11,6 +11,7 @@ function requireEnv(name) {
 }
 
 const projectRoot = path.resolve(__dirname, "..");
+const appName = process.env.APP_NAME || "calorie-line-app";
 
 function getDefaultDatabasePath() {
   if (process.env.DATABASE_PATH) {
@@ -22,13 +23,14 @@ function getDefaultDatabasePath() {
   }
 
   if (process.platform === "win32" && process.env.LOCALAPPDATA) {
-    return path.join(process.env.LOCALAPPDATA, "calorie-line-app", "calorie-line.sqlite");
+    return path.join(process.env.LOCALAPPDATA, appName, `${appName}.sqlite`);
   }
 
-  return path.join(os.homedir(), ".calorie-line-app", "calorie-line.sqlite");
+  return path.join(os.homedir(), `.${appName}`, `${appName}.sqlite`);
 }
 
 module.exports = {
+  appName,
   port: Number(process.env.PORT || 3000),
   timezone: process.env.APP_TIMEZONE || "Asia/Tokyo",
   lineChannelAccessToken: requireEnv("LINE_CHANNEL_ACCESS_TOKEN"),

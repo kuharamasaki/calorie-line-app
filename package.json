@@ -2,10 +2,10 @@
   "name": "calorie-line-app",
   "version": "1.0.0",
   "description": "LINE bot that estimates meal calories from photos and tracks weekly totals.",
-  "main": "src/main.js",
+  "main": "src/runtime.js",
   "scripts": {
-    "start": "node src/main.js",
-    "dev": "node --watch src/main.js"
+    "start": "node src/runtime.js",
+    "dev": "node --watch src/runtime.js"
   },
   "keywords": [
     "line",
