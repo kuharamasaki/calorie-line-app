@@ -1,0 +1,29 @@
+{
+  "name": "calorie-line-app",
+  "version": "1.0.0",
+  "description": "LINE bot that estimates meal calories from photos and tracks weekly totals.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "line",
+    "express",
+    "openai",
+    "sqlite"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "openai": "^4.104.0",
+    "pg": "^8.13.1",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
+  }
+}
