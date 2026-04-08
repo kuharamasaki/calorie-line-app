@@ -113,7 +113,7 @@ async function main() {
 
       await safeReply(
         event.replyToken,
-        `${actor.displayName} さんがランキングのリセットを申請しました。\n別の参加者が「承認」と送るとTOP5をリセットします。`
+        `${actor.displayName} さんがランキングのリセットを申請しました。\n別の参加者が「承認」と送るとTOP3をリセットします。`
       );
       return;
     }
@@ -137,13 +137,13 @@ async function main() {
 
       await safeReply(
         event.replyToken,
-        `リセット完了。\n申請者: ${result.request.requestedByName}\n承認者: ${actor.displayName}\nランキングTOP5を初期化しました。`
+        `リセット完了。\n申請者: ${result.request.requestedByName}\n承認者: ${actor.displayName}\nランキングTOP3を初期化しました。`
       );
       return;
     }
 
     if (isRankingRequest(text)) {
-      const ranking = await store.getTopRankings(actor.groupId, 5);
+      const ranking = await store.getTopRankings(actor.groupId, 3);
       await safeReply(event.replyToken, formatRankingText(ranking));
       return;
     }
@@ -173,7 +173,7 @@ async function main() {
       summary: photo.summary
     });
 
-    const ranking = await store.getTopRankings(actor.groupId, 5);
+    const ranking = await store.getTopRankings(actor.groupId, 3);
     const position = await store.getRankingPosition(actor.groupId, event.message.id);
     const joinedReasons = photo.reasons.map((reason) => `・${reason}`).join("\n");
     const bonusLine = photo.bonusTags.length ? `ボーナス: ${photo.bonusTags.join(" / ")}` : "";
@@ -187,12 +187,12 @@ async function main() {
       joinedReasons
     ];
 
-    if (position > 0 && position <= 5) {
-      lines.push(`TOP5入りです。現在 ${position} 位。`);
+    if (position > 0 && position <= 3) {
+      lines.push(`TOP3入りです。現在 ${position} 位。`);
       lines.push("");
       lines.push(formatRankingText(ranking));
     } else {
-      lines.push("今回はTOP5まであと少し。次の一枚も楽しみです。");
+      lines.push("今回はTOP3まであと少し。次の一枚も楽しみです。");
     }
 
     await safeReply(event.replyToken, lines.filter(Boolean).join("\n"));
@@ -201,7 +201,7 @@ async function main() {
 
 function buildHelpText() {
   return [
-    "旅行写真を送ると採点してTOP5を判定します。",
+    "旅行写真を送ると採点してTOP3を判定します。",
     "使えるコマンド:",
     "・ランキング",
     "・リセット",
@@ -210,7 +210,7 @@ function buildHelpText() {
 }
 
 function isRankingRequest(text) {
-  return /^(ランキング|top5|順位)$/i.test(text);
+  return /^(ランキング|top3|順位)$/i.test(text);
 }
 
 function isResetRequest(text) {
@@ -223,11 +223,11 @@ function isResetApproval(text) {
 
 function formatRankingText(ranking) {
   if (!ranking.length) {
-    return "ランキングTOP5はまだありません。写真を送ってスタートしましょう。";
+    return "ランキングTOP3はまだありません。写真を送ってスタートしましょう。";
   }
 
-  const medal = ["🥇", "🥈", "🥉", "4.", "5."];
-  const lines = ["ランキングTOP5"];
+  const medal = ["🥇", "🥈", "🥉"];
+  const lines = ["ランキングTOP3"];
 
   ranking.forEach((entry, index) => {
     lines.push(`${medal[index] || `${index + 1}.`} ${entry.title}`);
